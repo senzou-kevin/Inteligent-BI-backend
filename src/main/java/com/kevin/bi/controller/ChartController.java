@@ -1,5 +1,6 @@
 package com.kevin.bi.controller;
 
+import cn.hutool.core.io.FileUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
@@ -32,6 +33,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.util.Arrays;
+import java.util.List;
 
 
 /**
@@ -248,6 +251,10 @@ public class ChartController {
         //文件大小
         final long ONE_MB = 1024 * 1024L;
         ThrowUtils.throwIf(size > ONE_MB,ErrorCode.PARAMS_ERROR,"文件超1MB");
+        //检验文件后缀
+        String suffix = FileUtil.getSuffix(originalFilename);
+        final List<String> validFileSuffix = Arrays.asList("xlsx","xls");
+        ThrowUtils.throwIf(!validFileSuffix.contains(suffix),ErrorCode.PARAMS_ERROR,"文件后缀非法");
 
         User loginUser = userService.getLoginUser(request);
         //限流判断 每个用户一个限流器
