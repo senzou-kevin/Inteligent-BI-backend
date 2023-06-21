@@ -14,6 +14,7 @@ import com.kevin.bi.exception.ThrowUtils;
 import com.kevin.bi.manager.RedisLimiterManager;
 import com.kevin.bi.model.dto.chart.*;
 import com.kevin.bi.model.entity.User;
+import com.kevin.bi.mq.producer.BIProducer;
 import com.kevin.bi.service.ChartService;
 import com.kevin.bi.service.UserService;
 import com.kevin.bi.utils.SqlUtils;
@@ -62,6 +63,9 @@ public class ChartController {
 
     @Resource
     private RedisLimiterManager redisLimiterManager;
+
+    @Resource
+    private BIProducer biProducer;
 
     private final static Gson GSON = new Gson();
 
@@ -257,8 +261,8 @@ public class ChartController {
         ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1M");
         // 校验文件后缀 aaa.png
         String suffix = FileUtil.getSuffix(originalFilename);
-        final List<String> validFileSuffixList = Arrays.asList("png", "jpg", "svg", "webp", "jpeg");
-        ThrowUtils.throwIf(!validFileSuffixList.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
+        final List<String> validFileSuffix = Arrays.asList("xlsx","xls");
+        ThrowUtils.throwIf(!validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
 
         User loginUser = userService.getLoginUser(request);
         // 限流判断，每个用户一个限流器
@@ -304,7 +308,9 @@ public class ChartController {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成错误");
         }
         String genChart = splits[1].trim();
+        log.info("ChartController:genChartByAi-->genChart:{}",genChart);
         String genResult = splits[2].trim();
+        log.info("ChartController:genChartByAi-->genResult:{}",genResult);
         // 插入到数据库
         Chart chart = new Chart();
         chart.setName(name);
@@ -362,11 +368,11 @@ public class ChartController {
 //                "分析需求：\n" +
 //                "{数据分析的需求或者目标}\n" +
 //                "原始数据：\n" +
-//                "{csv格式的原始数据，用,作为分隔符}\n" +
+//                "{csv格式的原始数据，用,作为分隔符} \n" +
 //                "请根据这两部分内容，按照以下指定格式生成内容（此外不要输出任何多余的开头、结尾、注释）\n" +
-//                "【【【【【\n" +
+//                "【【【【【 \n" +
 //                "{前端 Echarts V5 的 option 配置对象js代码，合理地将数据进行可视化，不要生成任何多余的内容，比如注释}\n" +
-//                "【【【【【\n" +
+//                "【【【【【 \n" +
 //                "{明确的数据分析结论、越详细越好，不要生成多余的注释}";
         long biModel = 1659171950288818178L;
         // 分析需求：
@@ -389,7 +395,6 @@ public class ChartController {
         userInput.append("原始数据：").append("\n");
         //压缩后的数据 采用csv
         String csvData  = ExcelUtils.excelToCsv(multipartFile);
-        log.info("ChartController:genChartByAi-->csvData:{}",csvData);
         userInput.append(csvData).append("\n");
         log.info("ChartController:genChartByAi-->userInput:{}",userInput.toString());
 
@@ -403,59 +408,16 @@ public class ChartController {
         chart.setUserId(loginUser.getId());
         boolean saveResult = chartService.save(chart);
         ThrowUtils.throwIf(!saveResult,ErrorCode.SYSTEM_ERROR,"图表保存失败");
-
-        //采用异步方式调用AI
-        CompletableFuture.runAsync(()->{
-            //先修改图表任务状态为"执行中"，等执行成功后，改成已完成，保存执行结果；执行失败，状态改为"失败"，记录任务失败新
-            Chart updateChart = new Chart();
-            updateChart.setId(chart.getId());
-            updateChart.setStatus("running");
-            boolean b = chartService.updateById(updateChart);
-            if(!b){
-                //一般是数据库有问题才会走到这一步。
-                handleChartUpdateError(chart.getId(),"更新图表执行中状态失败");
-                return;
-            }
-
-            //调用鱼聪明sdk
-            String result = aiManager.doChat(biModel, userInput.toString());
-            String[] splits = result.split("【【【【【");
-            if(splits.length < 3){
-                handleChartUpdateError(chart.getId(),"AI生成错误");
-                return;
-            }
-            String genChart = splits[1].trim();
-            String genResult = splits[2].trim();
-
-            //表示调用AI接口成功，需要把数据库中status信息改为success
-            Chart updateChartResult = new Chart();
-            updateChartResult.setId(chart.getId());
-            updateChartResult.setStatus("success");
-            updateChartResult.setGenResult(genResult);
-            updateChartResult.setGenChart(genChart);
-            boolean res = chartService.updateById(updateChart);
-            if(!res){
-                //一般是数据库有问题才会走到这一步。
-                handleChartUpdateError(chart.getId(),"更新图表成功状态失败");
-            }
-        },threadPoolExecutor);
-
+        long newChartId = chart.getId();
+        //将图表id丢入kafka
+        biProducer.doSend(String.valueOf(newChartId));
         BiResponse biResponse = new BiResponse();
-        biResponse.setChartId(chart.getId());
+        biResponse.setChartId(newChartId);
         return ResultUtils.success(biResponse);
 
     }
 
-    private void handleChartUpdateError(long chartId,String execMessage){
-        Chart updateChartResult = new Chart();
-        updateChartResult.setId(chartId);
-        updateChartResult.setStatus("fail");
-        updateChartResult.setExecMessage(execMessage);
-        boolean updateResult = chartService.updateById(updateChartResult);
-        if(!updateResult){
-            log.error("更新图表失败状态失败",chartId+","+execMessage);
-        }
-    }
+
 
     /**
      * 获取查询包装类
